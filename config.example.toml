@@ -21,6 +21,13 @@ size = "60x30"
 grid = 3
 # Period passed to user.gettopalbums: 7day | 1month | 3month | 6month | 12month | overall
 period = "7day"
+# Output mode:
+#   symbols  — chafa-stylised mix of block glyphs (broad terminal support)
+#   iterm    — raw PNG via iTerm2 inline-image protocol (pixel-perfect, iTerm2 only)
+#   kitty    — raw PNG via kitty graphics protocol (kitty only)
+#   sixels   — sixel-compatible terminals (mlterm, foot, recent xterm)
+# Also override per-call with --format / --raw, or via $SCROBBLE_SAY_FORMAT.
+format = "symbols"
 
 [cache]
 # Where to keep downloaded cover art + composed grids.
