@@ -153,10 +153,7 @@ def _fetch_top_albums_raw(user: str, api_key: str, period: str, limit: int) -> l
             break
     return out
 
-def fetch_now_playing(user: str, api_key: str) -> RecentTrack | None:
-    """Return the currently-playing track, or the most recent scrobble if
-    nothing is playing right now. Returns None on transport failure or empty
-    history."""
+def _fetch_now_playing_raw(user: str, api_key: str) -> RecentTrack | None:
     params = {
         "method": "user.getrecenttracks",
         "user": user,
@@ -185,6 +182,35 @@ def fetch_now_playing(user: str, api_key: str) -> RecentTrack | None:
     )
 
 
+def fetch_now_playing(
+    user: str, get_api_key_fn,
+    cache: Path | None, ttl_seconds: int = 30,
+) -> RecentTrack | None:
+    """Cached now-playing lookup. Default TTL 30s (currently-playing track
+    changes every few minutes; 30s is fresh enough). get_api_key_fn is only
+    called on cache miss — important to avoid 1Password Touch ID prompts on
+    every invocation."""
+    if not cache or ttl_seconds <= 0:
+        return _fetch_now_playing_raw(user, get_api_key_fn())
+    cache_dir = cache / "api"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"nowplaying-{user}.json"
+    if cache_file.exists():
+        age = time.time() - cache_file.stat().st_mtime
+        if age < ttl_seconds:
+            try:
+                data = json.loads(cache_file.read_text())
+                return RecentTrack(**data) if data else None
+            except Exception:
+                cache_file.unlink(missing_ok=True)
+    rt = _fetch_now_playing_raw(user, get_api_key_fn())
+    try:
+        cache_file.write_text(json.dumps(asdict(rt) if rt else None))
+    except Exception:
+        pass
+    return rt
+
+
 def _humanise_ago(ts: int) -> str:
     """'2m ago', '3h ago', '4d ago' style relative time."""
     if ts <= 0:
@@ -200,14 +226,16 @@ def _humanise_ago(ts: int) -> str:
 
 
 def fetch_top_albums(
-    user: str, api_key: str, period: str, limit: int,
+    user: str, get_api_key_fn, period: str, limit: int,
     cache: Path | None, ttl_seconds: int,
 ) -> list[Album]:
-    """Cached wrapper. On-disk cache keyed by (user, period, limit). When the
-    cache file is fresh (mtime within ttl_seconds), return its contents
-    without hitting Last.fm. Set ttl_seconds=0 to disable caching."""
+    """Cached wrapper. On-disk cache keyed by (user, period, limit). When
+    the cache file is fresh (mtime within ttl_seconds), return its contents
+    without hitting Last.fm AND without calling get_api_key_fn — important
+    because get_api_key_fn typically triggers a 1Password Touch ID prompt,
+    and we want zero prompts on cache hits."""
     if not cache or ttl_seconds <= 0:
-        return _fetch_top_albums_raw(user, api_key, period, limit)
+        return _fetch_top_albums_raw(user, get_api_key_fn(), period, limit)
     cache_dir = cache / "api"
     cache_dir.mkdir(parents=True, exist_ok=True)
     key = hashlib.sha1(f"{user}::{period}::{limit}".encode()).hexdigest()[:16]
@@ -220,11 +248,12 @@ def fetch_top_albums(
                 return [Album(**a) for a in data]
             except Exception:
                 cache_file.unlink(missing_ok=True)  # bad cache, refetch
-    albums = _fetch_top_albums_raw(user, api_key, period, limit)
+    # Cache miss → now we need the key
+    albums = _fetch_top_albums_raw(user, get_api_key_fn(), period, limit)
     try:
         cache_file.write_text(json.dumps([asdict(a) for a in albums], indent=2))
     except Exception:
-        pass  # caching is best-effort
+        pass
     return albums
 
 
@@ -537,9 +566,10 @@ def main() -> None:
         print(cache_clear(cache_dir(cfg)))
         return
     if args.now:
-        api_key = get_api_key(cfg)
         user = cfg["lastfm"]["username"]
-        rt = fetch_now_playing(user, api_key)
+        cache = cache_dir(cfg)
+        now_ttl = int(cfg.get("cache", {}).get("now_ttl_seconds", 30))
+        rt = fetch_now_playing(user, lambda: get_api_key(cfg), cache, now_ttl)
         if rt is None:
             print("(no recent scrobbles)")
             return
@@ -560,8 +590,9 @@ def main() -> None:
     cover_cap_bytes = cover_cap_mb * 1024 * 1024
 
     cache = cache_dir(cfg)
-    api_key = get_api_key(cfg)
-    albums = fetch_top_albums(user, api_key, period, cols * rows, cache, ttl)
+    # Lazy: get_api_key is only invoked on cache miss, so warm calls skip
+    # the 1Password Touch ID prompt entirely.
+    albums = fetch_top_albums(user, lambda: get_api_key(cfg), period, cols * rows, cache, ttl)
 
     if args.json:
         print(json.dumps(

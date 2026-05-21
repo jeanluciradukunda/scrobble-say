@@ -121,16 +121,35 @@ Prefer env vars? Set `secrets_source = "env"` in your config and export
 
 | Path | What | Bound |
 |---|---|---|
-| `~/.cache/scrobble-say/api/` | Last.fm JSON, TTL'd | 24h freshness by default |
+| `~/.cache/scrobble-say/api/topalbums-*.json` | top-albums responses | 24h freshness by default |
+| `~/.cache/scrobble-say/api/nowplaying-*.json` | currently-playing track | 30s freshness by default |
 | `~/.cache/scrobble-say/covers/` | downloaded album cover PNGs | LRU-evicted at 50 MB (configurable) |
 | `/tmp/scrobble-say-grid.png` | composed grid for chafa | one file, overwritten each call |
+
+**On Touch ID / 1Password**: the Last.fm API key is read via `op read` only
+on a cache miss. Warm calls (within the TTL window) skip op entirely, so
+new terminals don't trigger a Touch ID prompt every time. Typical warm
+call is ~100ms; cold call is ~2-8s (op + Last.fm + cover downloads on
+first time).
 
 Tune in `~/.config/scrobble-say/config.toml`:
 ```toml
 [cache]
-ttl_seconds   = 86400   # API-response cache freshness; 0 = disabled
-covers_max_mb = 50      # covers LRU cap; 0 = disabled
+ttl_seconds       = 86400   # top-albums freshness (24h); 0 = disabled
+now_ttl_seconds   = 30      # --now freshness; 0 = always live
+covers_max_mb     = 50      # covers LRU cap; 0 = disabled
 ```
+
+Force a fresh fetch any time: `scrobble-say --no-cache` (one-shot), or
+nuke caches with `scrobble-say --cache-clear`.
+
+### Debug
+
+`SCROBBLE_DEBUG=1` logs terminal-width detection, computed image size,
+and positioning slack to stderr. Useful when `--position center` looks
+left-aligned (typically a terminal-width detection issue in the precmd
+context — the debug log shows which fallback fired: `os.get_terminal_size`,
+`$COLUMNS`, `tput cols`, or the 100-col last resort).
 
 ## Pre-commit / secret scanning
 

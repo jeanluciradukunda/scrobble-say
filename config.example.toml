@@ -40,7 +40,12 @@ position = "left"
 # Set to "" to disable on-disk caching.
 dir = "~/.cache/scrobble-say"
 # Re-fetch top-albums data after this many seconds (default: 1 day).
+# The 1Password Touch ID prompt fires ONLY when this cache is stale —
+# warm calls (within ttl_seconds) skip op entirely.
 ttl_seconds = 86400
+# Re-fetch --now (currently playing) after this many seconds (default: 30).
+# Short because the playing track changes every few minutes.
+now_ttl_seconds = 30
 # Maximum size of the covers/ subdir in MB. Oldest-mtime files are LRU-evicted
 # when the cap is exceeded. Each cover is ~100KB; 50MB ≈ 500 unique covers.
 # Set to 0 to disable eviction (cache grows forever).
