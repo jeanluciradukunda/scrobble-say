@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# scrobble-say shim — invokes the script via the project-local venv so the
+# command works as a single word from anywhere.
+#
+# Put this directory on $PATH (e.g. in ~/.zshrc) to use the bare name:
+#   export PATH="$HOME/myspace/scrobble-say/bin:$PATH"
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$REPO/venv/bin/python3" "$REPO/scrobble_say.py" "$@"

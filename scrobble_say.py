@@ -60,6 +60,15 @@ class Album:
         return hashlib.sha1(f"{self.artist}::{self.name}".encode()).hexdigest()
 
 
+@dataclass(frozen=True)
+class RecentTrack:
+    artist: str
+    name: str
+    album: str
+    now_playing: bool       # True if Last.fm marks it as currently playing
+    timestamp: int          # unix seconds; 0 if now_playing
+
+
 # --- Config -------------------------------------------------------------------
 
 def load_config() -> dict[str, Any]:
@@ -143,6 +152,52 @@ def _fetch_top_albums_raw(user: str, api_key: str, period: str, limit: int) -> l
         if len(out) >= limit:
             break
     return out
+
+def fetch_now_playing(user: str, api_key: str) -> RecentTrack | None:
+    """Return the currently-playing track, or the most recent scrobble if
+    nothing is playing right now. Returns None on transport failure or empty
+    history."""
+    params = {
+        "method": "user.getrecenttracks",
+        "user": user,
+        "api_key": api_key,
+        "limit": 1,
+        "format": "json",
+    }
+    try:
+        r = requests.get(LASTFM_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=10)
+        r.raise_for_status()
+    except Exception:
+        return None
+    tracks = r.json().get("recenttracks", {}).get("track", [])
+    if not tracks:
+        return None
+    t = tracks[0] if isinstance(tracks, list) else tracks
+    attr = t.get("@attr") or {}
+    now = bool(attr.get("nowplaying") == "true")
+    ts = int(t.get("date", {}).get("uts", 0)) if not now else 0
+    return RecentTrack(
+        artist=t.get("artist", {}).get("#text") or "?",
+        name=t.get("name") or "?",
+        album=t.get("album", {}).get("#text") or "",
+        now_playing=now,
+        timestamp=ts,
+    )
+
+
+def _humanise_ago(ts: int) -> str:
+    """'2m ago', '3h ago', '4d ago' style relative time."""
+    if ts <= 0:
+        return ""
+    delta = int(time.time()) - ts
+    if delta < 60:
+        return f"{delta}s ago"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
 
 def fetch_top_albums(
     user: str, api_key: str, period: str, limit: int,
@@ -392,17 +447,31 @@ def main() -> None:
                     help="print cache directory + size + file count; exit")
     ap.add_argument("--cache-clear", action="store_true",
                     help="delete cached covers, API responses, and the /tmp grid; exit")
+    ap.add_argument("--now", action="store_true",
+                    help="print currently-playing track (or last scrobble) as a one-line greeting; exit")
     ap.add_argument("--json", action="store_true", help="dump album list as JSON, skip render")
     args = ap.parse_args()
 
     cfg = load_config()
 
-    # --cache-info / --cache-clear short-circuit before doing anything else
+    # --cache-info / --cache-clear / --now short-circuit before doing anything else
     if args.cache_info:
         print(cache_info(cache_dir(cfg)))
         return
     if args.cache_clear:
         print(cache_clear(cache_dir(cfg)))
+        return
+    if args.now:
+        api_key = get_api_key(cfg)
+        user = cfg["lastfm"]["username"]
+        rt = fetch_now_playing(user, api_key)
+        if rt is None:
+            print("(no recent scrobbles)")
+            return
+        marker = "♪" if rt.now_playing else "♫"
+        suffix = "" if rt.now_playing else f"  ({_humanise_ago(rt.timestamp)})"
+        album = f"  · {rt.album}" if rt.album else ""
+        print(f"{marker} {rt.artist} — {rt.name}{album}{suffix}")
         return
 
     period = args.period or cfg["render"].get("period", "7day")
