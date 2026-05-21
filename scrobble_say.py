@@ -184,13 +184,96 @@ def cache_dir(cfg: dict[str, Any]) -> Path | None:
     return p
 
 
-def fetch_cover(album: Album, cache: Path | None) -> Image.Image | None:
+# ---- Cache hygiene ---------------------------------------------------------
+
+def _dir_size_bytes(d: Path) -> int:
+    if not d.exists():
+        return 0
+    return sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+
+def _human_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n = n / 1024  # type: ignore[assignment]
+    return f"{n:.1f} TB"
+
+def evict_covers_lru(covers_dir: Path, max_bytes: int) -> int:
+    """Delete oldest-by-mtime cover files until covers_dir is under max_bytes.
+    Returns the number of files deleted. Triggered after fetch_cover writes
+    a new file. No-op if dir is already under cap."""
+    if not covers_dir.exists() or max_bytes <= 0:
+        return 0
+    files = sorted(
+        (f for f in covers_dir.iterdir() if f.is_file()),
+        key=lambda f: f.stat().st_mtime,
+    )
+    total = sum(f.stat().st_size for f in files)
+    deleted = 0
+    for f in files:
+        if total <= max_bytes:
+            break
+        size = f.stat().st_size
+        try:
+            f.unlink()
+            total -= size
+            deleted += 1
+        except OSError:
+            pass
+    return deleted
+
+def cache_info(cache: Path | None) -> str:
+    if cache is None:
+        return "cache: disabled"
+    lines = [f"cache dir: {cache}"]
+    for sub in ("covers", "api"):
+        d = cache / sub
+        n = sum(1 for _ in d.glob("*")) if d.exists() else 0
+        sz = _dir_size_bytes(d)
+        lines.append(f"  {sub:<8} {n:>4} files   {_human_bytes(sz)}")
+    grid_tmp = GRID_TMP_PATH
+    if grid_tmp.exists():
+        lines.append(f"  /tmp grid: {_human_bytes(grid_tmp.stat().st_size)}")
+    return "\n".join(lines)
+
+def cache_clear(cache: Path | None) -> str:
+    removed_bytes = 0
+    files_removed = 0
+    targets = []
+    if cache is not None:
+        targets.extend([cache / "covers", cache / "api"])
+    for d in targets:
+        if not d.exists():
+            continue
+        for f in d.iterdir():
+            if f.is_file():
+                removed_bytes += f.stat().st_size
+                try:
+                    f.unlink()
+                    files_removed += 1
+                except OSError:
+                    pass
+    # Also wipe any stray /tmp grid files (current stable + any legacy
+    # PID-suffixed leftovers from before the fix)
+    for p in Path("/tmp").glob("scrobble-say-grid*.png"):
+        try:
+            removed_bytes += p.stat().st_size
+            p.unlink()
+            files_removed += 1
+        except OSError:
+            pass
+    return f"removed {files_removed} files, freed {_human_bytes(removed_bytes)}"
+
+
+def fetch_cover(album: Album, cache: Path | None, cover_cap_bytes: int = 0) -> Image.Image | None:
     if not album.image_url:
         return None
     if cache:
         f = cache / "covers" / f"{album.cache_key}.png"
         if f.exists():
             try:
+                # Touch mtime so LRU eviction treats recently-used covers as fresh
+                os.utime(f, None)
                 return Image.open(f).convert("RGB")
             except Exception:
                 f.unlink(missing_ok=True)
@@ -202,14 +285,27 @@ def fetch_cover(album: Album, cache: Path | None) -> Image.Image | None:
     from io import BytesIO
     img = Image.open(BytesIO(r.content)).convert("RGB")
     if cache:
-        img.save(cache / "covers" / f"{album.cache_key}.png", format="PNG")
+        covers_dir = cache / "covers"
+        img.save(covers_dir / f"{album.cache_key}.png", format="PNG")
+        if cover_cap_bytes > 0:
+            evict_covers_lru(covers_dir, cover_cap_bytes)
     return img
 
 
+GRID_TMP_PATH = Path("/tmp") / "scrobble-say-grid.png"
+
 def compose_grid(
-    albums: list[Album], cols: int, rows: int, cache: Path | None, cell_px: int = 220,
+    albums: list[Album], cols: int, rows: int, cache: Path | None,
+    cell_px: int = 220, cover_cap_bytes: int = 0,
 ) -> Path:
-    """Returns path to a temporary PNG of the composed grid (cols x rows)."""
+    """Returns path to a PNG of the composed grid (cols x rows).
+
+    Writes to a single stable path (/tmp/scrobble-say-grid.png) so we don't
+    leak a new file per invocation. chafa reads it once; the file is
+    overwritten on the next call.
+
+    cover_cap_bytes > 0 triggers LRU eviction of the covers cache after a new
+    cover is downloaded (oldest-mtime files deleted until under cap)."""
     canvas = Image.new("RGB", (cell_px * cols, cell_px * rows), color=(20, 20, 20))
     placeholder = Image.new("RGB", (cell_px, cell_px), color=(40, 40, 40))
     needed = cols * rows
@@ -217,14 +313,13 @@ def compose_grid(
         col = i % cols
         row = i // cols
         if i < len(albums):
-            img = fetch_cover(albums[i], cache) or placeholder
+            img = fetch_cover(albums[i], cache, cover_cap_bytes) or placeholder
         else:
             img = placeholder
         img = img.resize((cell_px, cell_px), Image.LANCZOS)
         canvas.paste(img, (col * cell_px, row * cell_px))
-    out = Path("/tmp") / f"scrobble-say-grid-{os.getpid()}.png"
-    canvas.save(out, format="PNG")
-    return out
+    canvas.save(GRID_TMP_PATH, format="PNG")
+    return GRID_TMP_PATH
 
 
 # --- Render -------------------------------------------------------------------
@@ -293,10 +388,23 @@ def main() -> None:
                     help="horizontal position in the terminal (default: left)")
     ap.add_argument("--no-cache", action="store_true",
                     help="bypass the on-disk top-albums cache (forces a fresh API call)")
+    ap.add_argument("--cache-info", action="store_true",
+                    help="print cache directory + size + file count; exit")
+    ap.add_argument("--cache-clear", action="store_true",
+                    help="delete cached covers, API responses, and the /tmp grid; exit")
     ap.add_argument("--json", action="store_true", help="dump album list as JSON, skip render")
     args = ap.parse_args()
 
     cfg = load_config()
+
+    # --cache-info / --cache-clear short-circuit before doing anything else
+    if args.cache_info:
+        print(cache_info(cache_dir(cfg)))
+        return
+    if args.cache_clear:
+        print(cache_clear(cache_dir(cfg)))
+        return
+
     period = args.period or cfg["render"].get("period", "7day")
     cols, rows = parse_grid(args.grid or str(cfg["render"].get("grid", 3)))
     size = args.size or cfg["render"].get("size", "60x30")
@@ -304,6 +412,8 @@ def main() -> None:
     position = args.position or cfg["render"].get("position", "left")
     user = cfg["lastfm"]["username"]
     ttl = 0 if args.no_cache else int(cfg.get("cache", {}).get("ttl_seconds", 86400))
+    cover_cap_mb = int(cfg.get("cache", {}).get("covers_max_mb", 50))
+    cover_cap_bytes = cover_cap_mb * 1024 * 1024
 
     cache = cache_dir(cfg)
     api_key = get_api_key(cfg)
@@ -316,7 +426,7 @@ def main() -> None:
         ))
         return
 
-    png = compose_grid(albums, cols, rows, cache)
+    png = compose_grid(albums, cols, rows, cache, cover_cap_bytes=cover_cap_bytes)
     code = render_with_chafa(png, size, fmt, position)
 
     # Caption line under the grid

@@ -40,3 +40,7 @@ position = "left"
 dir = "~/.cache/scrobble-say"
 # Re-fetch top-albums data after this many seconds (default: 1 day).
 ttl_seconds = 86400
+# Maximum size of the covers/ subdir in MB. Oldest-mtime files are LRU-evicted
+# when the cap is exceeded. Each cover is ~100KB; 50MB ≈ 500 unique covers.
+# Set to 0 to disable eviction (cache grows forever).
+covers_max_mb = 50
