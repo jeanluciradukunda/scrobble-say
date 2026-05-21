@@ -29,12 +29,12 @@ Two modes, both fed from your Last.fm history:
 ## Quick start
 
 ```bash
-scrobble-say                          # default: 3x3, 7 days
+scrobble-say                          # default: 3x3, 7 days, pixel-perfect iTerm2 render
 scrobble-say --period 1month          # last month
 scrobble-say --grid 4x4               # 16 covers
 scrobble-say --grid 10x2              # wide banner
 scrobble-say --grid 1x9               # tall sidebar
-scrobble-say --raw                    # pixel-perfect (iTerm2)
+scrobble-say --format symbols         # chafa stylised mode (fast, broad terminal support)
 scrobble-say --position center        # centred in terminal
 scrobble-say --position right         # right edge
 scrobble-say --now                    # currently playing, one line
@@ -42,6 +42,12 @@ scrobble-say --json                   # raw album list, no render
 scrobble-say --cache-info             # show cache sizes
 scrobble-say --cache-clear            # nuke covers + api + tmp grid
 ```
+
+The default render mode is `iterm` (raw inline image — pixel-perfect, iTerm2/
+Wezterm/etc.). Use `--format symbols` for plain xterm/tmux compatibility or
+when you want the faster chafa-stylised look. The cowsay-precmd snippet
+below passes `--format symbols` explicitly so the per-shell greeting stays
+snappy.
 
 ## Shell integration (cowsay rotation)
 

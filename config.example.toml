@@ -25,12 +25,13 @@ grid = 3
 # Period passed to user.gettopalbums: 7day | 1month | 3month | 6month | 12month | overall
 period = "7day"
 # Output mode:
-#   symbols  — chafa-stylised mix of block glyphs (broad terminal support)
-#   iterm    — raw PNG via iTerm2 inline-image protocol (pixel-perfect, iTerm2 only)
+#   iterm    — raw PNG via iTerm2 inline-image protocol (pixel-perfect; default)
 #   kitty    — raw PNG via kitty graphics protocol (kitty only)
 #   sixels   — sixel-compatible terminals (mlterm, foot, recent xterm)
+#   symbols  — chafa-stylised mix of block glyphs (broad terminal support, fast)
 # Also override per-call with --format / --raw, or via $SCROBBLE_SAY_FORMAT.
-format = "symbols"
+# Tip: the cowsay-precmd snippet passes --format symbols explicitly for speed.
+format = "iterm"
 # Horizontal position in the terminal: left | center | right
 position = "left"
 

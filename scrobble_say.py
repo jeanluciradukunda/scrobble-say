@@ -477,7 +477,7 @@ def main() -> None:
     period = args.period or cfg["render"].get("period", "7day")
     cols, rows = parse_grid(args.grid or str(cfg["render"].get("grid", 3)))
     size = args.size or cfg["render"].get("size", "60x30")
-    fmt = args.fmt or os.environ.get("SCROBBLE_SAY_FORMAT") or cfg["render"].get("format", "symbols")
+    fmt = args.fmt or os.environ.get("SCROBBLE_SAY_FORMAT") or cfg["render"].get("format", "iterm")
     position = args.position or cfg["render"].get("position", "left")
     user = cfg["lastfm"]["username"]
     ttl = 0 if args.no_cache else int(cfg.get("cache", {}).get("ttl_seconds", 86400))
