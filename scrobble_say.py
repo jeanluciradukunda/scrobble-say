@@ -413,34 +413,54 @@ VALID_POSITIONS = {"left", "center", "right"}
 
 import re as _re
 
-def _get_term_cols() -> int:
-    """Detect terminal width robustly. Useful when os.get_terminal_size()
-    fails (precmd contexts where the TTY isn't fully wired up yet) — falls
-    back to $COLUMNS (zsh sets this on SIGWINCH and at startup) and then to
-    `tput cols` as a last resort."""
-    debug = os.environ.get("SCROBBLE_DEBUG") == "1"
+DEBUG_LOG = Path("/tmp/scrobble-say-debug.log")
+
+def _log(msg: str) -> None:
+    """Always append to /tmp/scrobble-say-debug.log so we can diagnose
+    precmd-context issues after the fact. Best-effort; never raises."""
     try:
-        c = os.get_terminal_size().columns
-        if c > 0:
-            if debug: print(f"[scrobble-say debug] term_cols={c} via os.get_terminal_size", file=sys.stderr)
-            return c
-    except OSError:
+        with DEBUG_LOG.open("a") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
         pass
+    if os.environ.get("SCROBBLE_DEBUG") == "1":
+        print(f"[scrobble-say] {msg}", file=sys.stderr)
+
+def _get_term_cols() -> int:
+    """Detect terminal width robustly.
+
+    Tries in order:
+      1. $COLUMNS env var (must be exported by zsh; precmd helper does this)
+      2. os.get_terminal_size() (reliable when stdout is a tty)
+      3. `tput cols` (last resort, slow)
+      4. 100 (arbitrary fallback)
+
+    $COLUMNS goes first because in zsh precmd contexts, the env var (when
+    explicitly exported by the caller via `COLUMNS=$COLUMNS scrobble-say`)
+    is more trustworthy than os.get_terminal_size which depends on stdout
+    being a fully-initialised TTY — not always true during shell startup."""
     env = os.environ.get("COLUMNS", "").strip()
     if env.isdigit() and int(env) > 0:
         c = int(env)
-        if debug: print(f"[scrobble-say debug] term_cols={c} via $COLUMNS", file=sys.stderr)
+        _log(f"term_cols={c} via $COLUMNS")
         return c
+    try:
+        c = os.get_terminal_size().columns
+        if c > 0:
+            _log(f"term_cols={c} via os.get_terminal_size")
+            return c
+    except OSError as e:
+        _log(f"os.get_terminal_size failed: {e}")
     try:
         r = subprocess.run(["tput", "cols"], capture_output=True, text=True, timeout=1)
         out = r.stdout.strip()
         if out.isdigit() and int(out) > 0:
             c = int(out)
-            if debug: print(f"[scrobble-say debug] term_cols={c} via tput", file=sys.stderr)
+            _log(f"term_cols={c} via tput")
             return c
-    except (subprocess.SubprocessError, ValueError, FileNotFoundError):
-        pass
-    if debug: print("[scrobble-say debug] term_cols=100 (fallback)", file=sys.stderr)
+    except (subprocess.SubprocessError, ValueError, FileNotFoundError) as e:
+        _log(f"tput failed: {e}")
+    _log("term_cols=100 (fallback — could not detect)")
     return 100
 
 def _measure_image_cols(output: str, fmt: str, fallback: int) -> int:
@@ -508,8 +528,7 @@ def render_with_chafa(png: Path, size: str, fmt: str, position: str) -> int:
     fallback_cols = int(size.split("x")[0]) if "x" in size else int(size)
     image_cols = _measure_image_cols(output, fmt, fallback_cols)
     slack = term_cols - image_cols
-    if os.environ.get("SCROBBLE_DEBUG") == "1":
-        print(f"[scrobble-say debug] image_cols={image_cols} slack={slack} position={position}", file=sys.stderr)
+    _log(f"render fmt={fmt} size={size} position={position} term_cols={term_cols} image_cols={image_cols} slack={slack}")
     if slack <= 0:
         sys.stdout.write(output)
         return 0
