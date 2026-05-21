@@ -22,7 +22,8 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
@@ -99,12 +100,19 @@ def get_api_key(cfg: dict[str, Any]) -> str:
 
 # --- Last.fm ------------------------------------------------------------------
 
-def fetch_top_albums(user: str, api_key: str, period: str, limit: int) -> list[Album]:
-    """Return up to `limit` albums, skipping any without cover art.
+def parse_grid(spec: str) -> tuple[int, int]:
+    """Accept 'N' (= NxN) or 'WxH'. Returns (cols, rows)."""
+    s = spec.strip().lower()
+    if "x" in s:
+        a, b = s.split("x", 1)
+        cols, rows = int(a), int(b)
+    else:
+        cols = rows = int(s)
+    if cols < 1 or rows < 1:
+        sys.exit(f"grid dimensions must be positive, got {spec!r}")
+    return cols, rows
 
-    Last.fm sometimes returns albums with empty image arrays (no Last.fm-
-    hosted artwork). Those render as grey placeholders in the grid which
-    looks bad, so we over-fetch and filter."""
+def _fetch_top_albums_raw(user: str, api_key: str, period: str, limit: int) -> list[Album]:
     if period not in VALID_PERIODS:
         sys.exit(f"period must be one of {VALID_PERIODS}, got {period!r}")
     params = {
@@ -124,7 +132,7 @@ def fetch_top_albums(user: str, api_key: str, period: str, limit: int) -> list[A
         images = {img["size"]: img["#text"] for img in a.get("image", [])}
         url = images.get("extralarge") or images.get("large") or images.get("medium") or ""
         if not url:
-            continue   # skip cover-less albums
+            continue
         out.append(Album(
             name=a.get("name", "?"),
             artist=a.get("artist", {}).get("name", "?"),
@@ -135,6 +143,34 @@ def fetch_top_albums(user: str, api_key: str, period: str, limit: int) -> list[A
         if len(out) >= limit:
             break
     return out
+
+def fetch_top_albums(
+    user: str, api_key: str, period: str, limit: int,
+    cache: Path | None, ttl_seconds: int,
+) -> list[Album]:
+    """Cached wrapper. On-disk cache keyed by (user, period, limit). When the
+    cache file is fresh (mtime within ttl_seconds), return its contents
+    without hitting Last.fm. Set ttl_seconds=0 to disable caching."""
+    if not cache or ttl_seconds <= 0:
+        return _fetch_top_albums_raw(user, api_key, period, limit)
+    cache_dir = cache / "api"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(f"{user}::{period}::{limit}".encode()).hexdigest()[:16]
+    cache_file = cache_dir / f"topalbums-{user}-{period}-{limit}-{key}.json"
+    if cache_file.exists():
+        age = time.time() - cache_file.stat().st_mtime
+        if age < ttl_seconds:
+            try:
+                data = json.loads(cache_file.read_text())
+                return [Album(**a) for a in data]
+            except Exception:
+                cache_file.unlink(missing_ok=True)  # bad cache, refetch
+    albums = _fetch_top_albums_raw(user, api_key, period, limit)
+    try:
+        cache_file.write_text(json.dumps([asdict(a) for a in albums], indent=2))
+    except Exception:
+        pass  # caching is best-effort
+    return albums
 
 
 # --- Cover cache + grid --------------------------------------------------------
@@ -170,14 +206,16 @@ def fetch_cover(album: Album, cache: Path | None) -> Image.Image | None:
     return img
 
 
-def compose_grid(albums: list[Album], grid: int, cache: Path | None, cell_px: int = 220) -> Path:
-    """Returns path to a temporary PNG of the composed grid."""
-    canvas = Image.new("RGB", (cell_px * grid, cell_px * grid), color=(20, 20, 20))
-    needed = grid * grid
+def compose_grid(
+    albums: list[Album], cols: int, rows: int, cache: Path | None, cell_px: int = 220,
+) -> Path:
+    """Returns path to a temporary PNG of the composed grid (cols x rows)."""
+    canvas = Image.new("RGB", (cell_px * cols, cell_px * rows), color=(20, 20, 20))
     placeholder = Image.new("RGB", (cell_px, cell_px), color=(40, 40, 40))
+    needed = cols * rows
     for i in range(needed):
-        col = i % grid
-        row = i // grid
+        col = i % cols
+        row = i // cols
         if i < len(albums):
             img = fetch_cover(albums[i], cache) or placeholder
         else:
@@ -192,25 +230,49 @@ def compose_grid(albums: list[Album], grid: int, cache: Path | None, cell_px: in
 # --- Render -------------------------------------------------------------------
 
 VALID_FORMATS = {"symbols", "iterm", "kitty", "sixels"}
+VALID_POSITIONS = {"left", "center", "right"}
+POSITION_TO_CHAFA = {"left": "left", "center": "center", "right": "right"}
 
-def render_with_chafa(png: Path, size: str, fmt: str) -> int:
+def render_with_chafa(png: Path, size: str, fmt: str, position: str) -> int:
     """fmt:
         symbols  — chafa's stylised mix of block characters (broad terminal
                    support; works in plain xterm, screen, tmux)
         iterm    — iTerm2 inline-image protocol; raw pixel-perfect PNG
         kitty    — kitty graphics protocol; raw pixel-perfect PNG
         sixels   — sixel-compatible terminals (mlterm, foot, recent xterm)
-    The "raw" formats embed the actual PNG; chafa just wraps it in the
-    terminal's image escape, no stylisation applied.
+
+    position:
+        left     — default, image at column 0
+        center   — image horizontally centred in the terminal
+        right    — image at the right edge of the terminal
+
+    For center/right, we expand the chafa size to the full terminal width and
+    pass --align so chafa places the actual image accordingly; the grid art
+    is not scaled — it just shifts horizontally within the wider canvas.
     """
     chafa = shutil.which("chafa")
     if not chafa:
         sys.exit("chafa not found on PATH — `brew install chafa`")
     if fmt not in VALID_FORMATS:
         sys.exit(f"format must be one of {VALID_FORMATS}, got {fmt!r}")
-    return subprocess.call([
-        chafa, f"--size={size}", f"--format={fmt}", "--animate=off", str(png),
-    ])
+    if position not in VALID_POSITIONS:
+        sys.exit(f"position must be one of {VALID_POSITIONS}, got {position!r}")
+
+    cmd = [chafa, f"--format={fmt}", "--animate=off"]
+    if position == "left":
+        cmd.append(f"--size={size}")
+    else:
+        # Expand horizontal axis to terminal width so --align has room to shift.
+        try:
+            term_cols = os.get_terminal_size().columns
+        except OSError:
+            term_cols = 100
+        # Keep user's row count from the original size; widen cols only.
+        rows_part = size.split("x")[1] if "x" in size else size
+        cmd.append(f"--size={term_cols}x{rows_part}")
+        cmd.append(f"--align={POSITION_TO_CHAFA[position]},top")
+    cmd.append(str(png))
+    return subprocess.call(cmd)
 
 
 # --- CLI ----------------------------------------------------------------------
@@ -218,7 +280,7 @@ def render_with_chafa(png: Path, size: str, fmt: str) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--period", help="7day | 1month | 3month | 6month | 12month | overall")
-    ap.add_argument("--grid", type=int, help="grid side (3 = 3x3 = 9 covers)")
+    ap.add_argument("--grid", help="N (= NxN) or WxH (e.g. 3, 4x4, 10x2)")
     ap.add_argument("--size", help="chafa terminal size, e.g. 60x30")
     ap.add_argument("--format", dest="fmt",
                     help=f"output mode: one of {sorted(VALID_FORMATS)}. "
@@ -227,18 +289,25 @@ def main() -> None:
                          "(pixel-perfect, slower). Also settable via $SCROBBLE_SAY_FORMAT.")
     ap.add_argument("--raw", action="store_const", const="iterm", dest="fmt",
                     help="shortcut for --format=iterm")
+    ap.add_argument("--position", choices=sorted(VALID_POSITIONS),
+                    help="horizontal position in the terminal (default: left)")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="bypass the on-disk top-albums cache (forces a fresh API call)")
     ap.add_argument("--json", action="store_true", help="dump album list as JSON, skip render")
     args = ap.parse_args()
 
     cfg = load_config()
     period = args.period or cfg["render"].get("period", "7day")
-    grid = args.grid or int(cfg["render"].get("grid", 3))
+    cols, rows = parse_grid(args.grid or str(cfg["render"].get("grid", 3)))
     size = args.size or cfg["render"].get("size", "60x30")
     fmt = args.fmt or os.environ.get("SCROBBLE_SAY_FORMAT") or cfg["render"].get("format", "symbols")
+    position = args.position or cfg["render"].get("position", "left")
     user = cfg["lastfm"]["username"]
+    ttl = 0 if args.no_cache else int(cfg.get("cache", {}).get("ttl_seconds", 86400))
 
+    cache = cache_dir(cfg)
     api_key = get_api_key(cfg)
-    albums = fetch_top_albums(user, api_key, period, grid * grid)
+    albums = fetch_top_albums(user, api_key, period, cols * rows, cache, ttl)
 
     if args.json:
         print(json.dumps(
@@ -247,9 +316,8 @@ def main() -> None:
         ))
         return
 
-    cache = cache_dir(cfg)
-    png = compose_grid(albums, grid, cache)
-    code = render_with_chafa(png, size, fmt)
+    png = compose_grid(albums, cols, rows, cache)
+    code = render_with_chafa(png, size, fmt, position)
 
     # Caption line under the grid
     if albums:
