@@ -16,12 +16,14 @@ Credentials: read from 1Password via `op`. NEVER stored in config or repo.
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -82,10 +84,20 @@ def load_config() -> dict[str, Any]:
 
 
 def read_secret_via_op(vault: str, item_id: str, field: str) -> str:
-    r = subprocess.run(
-        ["op", "read", f"op://{vault}/{item_id}/{field}"],
-        capture_output=True, text=True,
-    )
+    try:
+        r = subprocess.run(
+            ["op", "read", f"op://{vault}/{item_id}/{field}"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        sys.exit(
+            "the 1Password CLI (`op`) is not installed but the config sets\n"
+            "  [lastfm] secrets_source = \"op\".\n"
+            "Install it with:  brew install --cask 1password-cli\n"
+            "Or switch to env-var auth in ~/.config/scrobble-say/config.toml:\n"
+            "  [lastfm] secrets_source = \"env\"\n"
+            "and `export LASTFM_API_KEY=...` in your shell."
+        )
     if r.returncode != 0:
         sys.exit(f"op read failed for field {field}: {r.stderr.strip()}")
     return r.stdout.strip()
@@ -109,32 +121,66 @@ def get_api_key(cfg: dict[str, Any]) -> str:
 
 # --- Last.fm ------------------------------------------------------------------
 
+MAX_GRID_CELLS = 200  # 14x14 ish — covers ~30MB of PIL canvas at cell_px=220
+
 def parse_grid(spec: str) -> tuple[int, int]:
-    """Accept 'N' (= NxN) or 'WxH'. Returns (cols, rows)."""
+    """Accept 'N' (= NxN) or 'WxH'. Returns (cols, rows).
+
+    Validates against MAX_GRID_CELLS to prevent a typo like --grid 1000
+    from allocating a 145GB canvas before crashing."""
     s = spec.strip().lower()
-    if "x" in s:
-        a, b = s.split("x", 1)
-        cols, rows = int(a), int(b)
-    else:
-        cols = rows = int(s)
+    try:
+        if "x" in s:
+            a, b = s.split("x", 1)
+            if not a.strip() or not b.strip():
+                raise ValueError("missing dimension")
+            cols, rows = int(a), int(b)
+        else:
+            cols = rows = int(s)
+    except ValueError:
+        sys.exit(f"--grid: must be 'N' or 'WxH' with positive integers, got {spec!r}")
     if cols < 1 or rows < 1:
-        sys.exit(f"grid dimensions must be positive, got {spec!r}")
+        sys.exit(f"--grid: dimensions must be positive, got {spec!r}")
+    cells = cols * rows
+    if cells > MAX_GRID_CELLS:
+        sys.exit(
+            f"--grid: {cols}x{rows} = {cells} cells exceeds limit of "
+            f"{MAX_GRID_CELLS}. Each cell is a ~50KB PNG; large grids "
+            "balloon memory and overrun Last.fm's per-call limits."
+        )
     return cols, rows
+
+class LastFmError(Exception):
+    """Last.fm returned a JSON error payload like {'error': 6, 'message': '...'}.
+    See https://www.last.fm/api/errorcodes for codes."""
+
+
+def _lastfm_call(params: dict, timeout: int = 20) -> dict:
+    """Single GET to the Last.fm API. Raises LastFmError on a JSON error
+    payload so callers can surface a real message instead of silently
+    returning empty data (e.g. a wrong username would look like 'no
+    albums')."""
+    r = requests.get(LASTFM_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, dict) and "error" in data:
+        code = data.get("error")
+        msg = data.get("message", "(no message)")
+        raise LastFmError(f"Last.fm API error {code}: {msg}")
+    return data
+
 
 def _fetch_top_albums_raw(user: str, api_key: str, period: str, limit: int) -> list[Album]:
     if period not in VALID_PERIODS:
         sys.exit(f"period must be one of {VALID_PERIODS}, got {period!r}")
-    params = {
+    data = _lastfm_call({
         "method": "user.gettopalbums",
         "user": user,
         "api_key": api_key,
         "period": period,
         "limit": limit * 3,   # over-fetch to absorb cover-less albums
         "format": "json",
-    }
-    r = requests.get(LASTFM_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=20)
-    r.raise_for_status()
-    data = r.json()
+    })
     raw = data.get("topalbums", {}).get("album", [])
     out: list[Album] = []
     for a in raw:
@@ -153,20 +199,19 @@ def _fetch_top_albums_raw(user: str, api_key: str, period: str, limit: int) -> l
             break
     return out
 
+
 def _fetch_now_playing_raw(user: str, api_key: str) -> RecentTrack | None:
-    params = {
+    """Returns None ONLY when there are genuinely no scrobbles. Network
+    failures and Last.fm API errors propagate so the caller can distinguish
+    'user has no history' from 'something is broken'."""
+    data = _lastfm_call({
         "method": "user.getrecenttracks",
         "user": user,
         "api_key": api_key,
         "limit": 1,
         "format": "json",
-    }
-    try:
-        r = requests.get(LASTFM_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=10)
-        r.raise_for_status()
-    except Exception:
-        return None
-    tracks = r.json().get("recenttracks", {}).get("track", [])
+    }, timeout=10)
+    tracks = data.get("recenttracks", {}).get("track", [])
     if not tracks:
         return None
     t = tracks[0] if isinstance(tracks, list) else tracks
@@ -307,42 +352,61 @@ def evict_covers_lru(covers_dir: Path, max_bytes: int) -> int:
     return deleted
 
 def cache_info(cache: Path | None) -> str:
-    if cache is None:
-        return "cache: disabled"
-    lines = [f"cache dir: {cache}"]
-    for sub in ("covers", "api"):
-        d = cache / sub
-        n = sum(1 for _ in d.glob("*")) if d.exists() else 0
-        sz = _dir_size_bytes(d)
-        lines.append(f"  {sub:<8} {n:>4} files   {_human_bytes(sz)}")
-    grid_tmp = GRID_TMP_PATH
-    if grid_tmp.exists():
-        lines.append(f"  /tmp grid: {_human_bytes(grid_tmp.stat().st_size)}")
+    lines = []
+    if cache is not None:
+        lines.append(f"cache dir: {cache}")
+        for sub in ("covers", "api"):
+            d = cache / sub
+            n = sum(1 for _ in d.glob("*")) if d.exists() else 0
+            sz = _dir_size_bytes(d)
+            lines.append(f"  {sub:<8} {n:>4} files   {_human_bytes(sz)}")
+    else:
+        lines.append("cache: disabled")
+    # Runtime dir (grid PNGs + debug log) is independent of the cache config
+    runtime = _runtime_dir()
+    n = sum(1 for _ in runtime.iterdir() if _.is_file())
+    lines.append(f"runtime dir: {runtime}")
+    lines.append(f"  files     {n:>4}        {_human_bytes(_dir_size_bytes(runtime))}")
     return "\n".join(lines)
 
 def cache_clear(cache: Path | None) -> str:
     removed_bytes = 0
     files_removed = 0
-    targets = []
+    targets: list[Path] = []
     if cache is not None:
         targets.extend([cache / "covers", cache / "api"])
+    # Also wipe ~/.cache/scrobble-say/runtime (grid PNGs from crashed runs,
+    # debug log) — except the CURRENT process's grid file which atexit
+    # handles itself.
+    targets.append(_runtime_dir())
     for d in targets:
         if not d.exists():
             continue
         for f in d.iterdir():
-            if f.is_file():
-                removed_bytes += f.stat().st_size
-                try:
-                    f.unlink()
-                    files_removed += 1
-                except OSError:
-                    pass
-    # Also wipe any stray /tmp grid files (current stable + any legacy
-    # PID-suffixed leftovers from before the fix)
+            if not f.is_file():
+                continue
+            if f == GRID_TMP_PATH:
+                continue   # leave this process's own grid alone
+            removed_bytes += f.stat().st_size
+            try:
+                f.unlink()
+                files_removed += 1
+            except OSError:
+                pass
+    # Sweep legacy /tmp grid files from older scrobble-say versions.
     for p in Path("/tmp").glob("scrobble-say-grid*.png"):
         try:
             removed_bytes += p.stat().st_size
             p.unlink()
+            files_removed += 1
+        except OSError:
+            pass
+    # Legacy /tmp debug log too
+    legacy_log = Path("/tmp/scrobble-say-debug.log")
+    if legacy_log.exists():
+        try:
+            removed_bytes += legacy_log.stat().st_size
+            legacy_log.unlink()
             files_removed += 1
         except OSError:
             pass
@@ -367,16 +431,43 @@ def fetch_cover(album: Album, cache: Path | None, cover_cap_bytes: int = 0) -> I
     except Exception:
         return None
     from io import BytesIO
-    img = Image.open(BytesIO(r.content)).convert("RGB")
+    try:
+        # A 200 response with HTML/error body raises UnidentifiedImageError —
+        # fall back to the placeholder instead of crashing the whole render.
+        img = Image.open(BytesIO(r.content)).convert("RGB")
+    except Exception as e:
+        _log(f"fetch_cover: decode failed for {album.artist}/{album.name}: {e!s}")
+        return None
     if cache:
         covers_dir = cache / "covers"
-        img.save(covers_dir / f"{album.cache_key}.png", format="PNG")
-        if cover_cap_bytes > 0:
-            evict_covers_lru(covers_dir, cover_cap_bytes)
+        try:
+            img.save(covers_dir / f"{album.cache_key}.png", format="PNG")
+            if cover_cap_bytes > 0:
+                evict_covers_lru(covers_dir, cover_cap_bytes)
+        except OSError as e:
+            _log(f"fetch_cover: cache save failed: {e!s}")
     return img
 
 
-GRID_TMP_PATH = Path("/tmp") / "scrobble-say-grid.png"
+def _runtime_dir() -> Path:
+    """User-private runtime dir for ephemeral state (grid PNG, debug log).
+    Lives under ~/.cache/scrobble-say/runtime so we avoid world-writable
+    /tmp entirely — that was a symlink-clobber risk and concurrent runs
+    of the previous stable path could overwrite each other mid-render."""
+    d = Path.home() / ".cache" / "scrobble-say" / "runtime"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    return d
+
+
+# Per-PID grid file so concurrent invocations don't collide. Cleaned up on
+# process exit so we don't leak files.
+GRID_TMP_PATH = _runtime_dir() / f"grid-{os.getpid()}.png"
+atexit.register(lambda: GRID_TMP_PATH.unlink(missing_ok=True))
+
 
 def compose_grid(
     albums: list[Album], cols: int, rows: int, cache: Path | None,
@@ -384,9 +475,10 @@ def compose_grid(
 ) -> Path:
     """Returns path to a PNG of the composed grid (cols x rows).
 
-    Writes to a single stable path (/tmp/scrobble-say-grid.png) so we don't
-    leak a new file per invocation. chafa reads it once; the file is
-    overwritten on the next call.
+    Writes to a per-PID path under ~/.cache/scrobble-say/runtime/ via
+    atomic write (write-then-rename), then atexit-cleans the file. This
+    avoids both the stable-path concurrent-overwrite race and the
+    world-writable /tmp symlink-clobber risk.
 
     cover_cap_bytes > 0 triggers LRU eviction of the covers cache after a new
     cover is downloaded (oldest-mtime files deleted until under cap)."""
@@ -402,7 +494,19 @@ def compose_grid(
             img = placeholder
         img = img.resize((cell_px, cell_px), Image.LANCZOS)
         canvas.paste(img, (col * cell_px, row * cell_px))
-    canvas.save(GRID_TMP_PATH, format="PNG")
+    # Atomic write: temp file in same dir + rename
+    fd, tmp = tempfile.mkstemp(
+        dir=str(GRID_TMP_PATH.parent),
+        prefix=f".{GRID_TMP_PATH.name}.",
+        suffix=".tmp",
+    )
+    os.close(fd)
+    try:
+        canvas.save(tmp, format="PNG")
+        os.replace(tmp, GRID_TMP_PATH)
+    except Exception:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return GRID_TMP_PATH
 
 
@@ -413,11 +517,12 @@ VALID_POSITIONS = {"left", "center", "right"}
 
 import re as _re
 
-DEBUG_LOG = Path("/tmp/scrobble-say-debug.log")
+DEBUG_LOG = _runtime_dir() / "debug.log"
 
 def _log(msg: str) -> None:
-    """Always append to /tmp/scrobble-say-debug.log so we can diagnose
-    precmd-context issues after the fact. Best-effort; never raises."""
+    """Append to the per-user debug log under ~/.cache/scrobble-say/runtime/.
+    Best-effort; never raises. Multi-process append is safe (atomic writes
+    for short messages on Unix)."""
     try:
         with DEBUG_LOG.open("a") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
@@ -517,11 +622,16 @@ def render_with_chafa(png: Path, size: str, fmt: str, position: str) -> int:
     if position == "left":
         return subprocess.call(cmd)
 
-    # Capture chafa output to inject our own positioning
+    # Capture chafa output to inject our own positioning.
+    # We capture stderr too so we can surface chafa's error messages on
+    # failure — capture_output=True swallows them otherwise, leaving users
+    # with a bare non-zero exit and no clue what went wrong.
     r = subprocess.run(cmd, capture_output=True, text=True)
     output = r.stdout
     if r.returncode != 0 or not output:
         sys.stdout.write(output)
+        if r.stderr:
+            sys.stderr.write(r.stderr)
         return r.returncode
 
     term_cols = _get_term_cols()
@@ -587,8 +697,14 @@ def main() -> None:
     if args.now:
         user = cfg["lastfm"]["username"]
         cache = cache_dir(cfg)
-        now_ttl = int(cfg.get("cache", {}).get("now_ttl_seconds", 30))
-        rt = fetch_now_playing(user, lambda: get_api_key(cfg), cache, now_ttl)
+        # --no-cache disables the now-playing cache too (Codex #4)
+        now_ttl = 0 if args.no_cache else int(cfg.get("cache", {}).get("now_ttl_seconds", 30))
+        try:
+            rt = fetch_now_playing(user, lambda: get_api_key(cfg), cache, now_ttl)
+        except LastFmError as e:
+            sys.exit(str(e))
+        except requests.RequestException as e:
+            sys.exit(f"network error: {e}")
         if rt is None:
             print("(no recent scrobbles)")
             return
@@ -611,7 +727,12 @@ def main() -> None:
     cache = cache_dir(cfg)
     # Lazy: get_api_key is only invoked on cache miss, so warm calls skip
     # the 1Password Touch ID prompt entirely.
-    albums = fetch_top_albums(user, lambda: get_api_key(cfg), period, cols * rows, cache, ttl)
+    try:
+        albums = fetch_top_albums(user, lambda: get_api_key(cfg), period, cols * rows, cache, ttl)
+    except LastFmError as e:
+        sys.exit(str(e))
+    except requests.RequestException as e:
+        sys.exit(f"network error: {e}")
 
     if args.json:
         print(json.dumps(

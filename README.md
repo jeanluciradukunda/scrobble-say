@@ -16,9 +16,10 @@ Sister project to [scrobble-now](https://github.com/jeanluciradukunda/scrobble-n
 Two modes, both fed from your Last.fm history:
 
 1. **Album grid** — fetches `user.gettopalbums`, downloads cover art (cached
-   to disk), composes an NxM grid via Pillow, prints it via chafa. Pick
-   stylised block-glyph rendering for speed (default) or raw inline-image
-   rendering (iTerm2 / kitty / sixels) for pixel-perfect covers.
+   to disk), composes an NxM grid via Pillow, prints it via chafa. Default
+   is raw inline-image rendering (iTerm2 / kitty / sixels) for pixel-perfect
+   covers; `--format symbols` switches to stylised block-glyphs for plain
+   xterm/tmux compatibility and faster output.
 
 2. **Now playing** — one-line greeting from `user.getrecenttracks`:
    ```
@@ -56,15 +57,18 @@ greeting. Add to `~/.zshrc`:
 
 ```sh
 export SCROBBLE_BOOST=20    # % of new terminals show albums instead of a cow
-export SCROBBLE_SAY_BIN="$HOME/myspace/scrobble-say/bin/scrobble-say"
+# (Make sure scrobble-say is on PATH — see Install section.)
 ```
 
 Then in your existing precmd that prints cowsay, roll first:
 
 ```sh
 if (( SCROBBLE_BOOST > 0 )) && (( RANDOM % 100 < SCROBBLE_BOOST )) \
-   && [[ -x $SCROBBLE_SAY_BIN ]]; then
-  "$SCROBBLE_SAY_BIN" --format symbols --size 60x30 && return
+   && command -v scrobble-say >/dev/null 2>&1; then
+  # Export COLUMNS so the Python script can detect terminal width
+  # (zsh has $COLUMNS as a parameter, doesn't always export it).
+  # `command` bypasses any shell function named scrobble-say.
+  COLUMNS=$COLUMNS command scrobble-say 2>/dev/null && return
 fi
 # … fall through to your cowsay code
 ```
@@ -87,7 +91,13 @@ fav/style/size knobs.)
 ## Install
 
 ```bash
-brew install chafa gitleaks pre-commit
+# Required system deps
+brew install chafa                          # terminal image renderer
+brew install --cask 1password-cli           # only if secrets_source = "op" (default)
+
+# Dev-only deps (skip if you're not committing)
+brew install gitleaks pre-commit
+
 git clone git@github.com:jeanluciradukunda/scrobble-say ~/myspace/scrobble-say
 cd ~/myspace/scrobble-say
 
@@ -95,17 +105,21 @@ cd ~/myspace/scrobble-say
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
-# Install gitleaks pre-commit hook
+# Optional: gitleaks pre-commit hook for contributors
 pre-commit install
 
 # Config
 mkdir -p ~/.config/scrobble-say
 cp config.example.toml ~/.config/scrobble-say/config.toml
 # Edit ~/.config/scrobble-say/config.toml: set lastfm.username + op_item_id
+# (Or set secrets_source = "env" and export LASTFM_API_KEY to skip 1Password)
 
 # Make `scrobble-say` callable from anywhere
 export PATH="$HOME/myspace/scrobble-say/bin:$PATH"   # add to ~/.zshrc
 ```
+
+Don't have a Last.fm API key? [Create one here](https://www.last.fm/api/account/create)
+— it's free and instant.
 
 ## Secrets
 

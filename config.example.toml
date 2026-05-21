@@ -4,9 +4,11 @@
 [lastfm]
 username = "your-lastfm-username"
 
-# Where to read the API key + shared secret from.
-#   "op"     — read from 1Password (default; preferred)
-#   "env"    — read from $LASTFM_API_KEY / $LASTFM_SHARED_SECRET env vars
+# Where to read the Last.fm API key from. (The shared secret isn't needed
+# because we only call public read-only endpoints — no signed/auth calls.)
+#   "op"   — read from 1Password (default; preferred). Requires the `op` CLI:
+#            brew install --cask 1password-cli
+#   "env"  — read from $LASTFM_API_KEY environment variable
 secrets_source = "op"
 
 # Only consulted if secrets_source = "op". Set to your 1Password item ID.
