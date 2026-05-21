@@ -177,12 +177,12 @@ If you ever commit a real key by accident:
 |---|---|---|
 | 1 | Top-albums-grid image in terminal | ✅ |
 | 2 | `--now` currently-playing one-liner | ✅ |
-| 3 | `--now` watch-mode (polling refresh, useful as a tmux pane) | todo |
-| 4 | Synced lyric line of currently-playing song via [LRClib](https://lrclib.net) | todo |
+| 3 | `--now` watch-mode (polling refresh, useful as a tmux pane) | [#2](https://github.com/jeanluciradukunda/scrobble-say/issues/2) |
+| 4 | Random lyric-snippet caption from a grid album (cowsay-style quote) via [LRClib](https://lrclib.net) | [#3](https://github.com/jeanluciradukunda/scrobble-say/issues/3) |
 | 5 | Cowsay precmd rotation (`SCROBBLE_BOOST` knob, `scrobble` helper) | ✅ |
 
 Open suggestions / collaborations in [issues](https://github.com/jeanluciradukunda/scrobble-say/issues)
-— issue #1 is about Apple Music playback control via `osascript`.
+— issue [#1](https://github.com/jeanluciradukunda/scrobble-say/issues/1) is about Apple Music playback control via `osascript`.
 
 ## License
 
