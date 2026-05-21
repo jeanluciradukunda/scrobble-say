@@ -2,8 +2,17 @@
 # scrobble-say shim — invokes the script via the project-local venv so the
 # command works as a single word from anywhere.
 #
-# Put this directory on $PATH (e.g. in ~/.zshrc) to use the bare name:
-#   export PATH="$HOME/myspace/scrobble-say/bin:$PATH"
+# Safe to symlink from ~/.local/bin or /usr/local/bin: this script resolves
+# the symlink chain to find its real location before locating the venv.
 set -euo pipefail
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Canonical "resolve $SOURCE through symlinks" idiom.
+SOURCE="${BASH_SOURCE[0]:-$0}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." >/dev/null && pwd)"
+
 exec "$REPO/venv/bin/python3" "$REPO/scrobble_say.py" "$@"

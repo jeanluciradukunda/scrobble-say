@@ -381,7 +381,27 @@ def compose_grid(
 
 VALID_FORMATS = {"symbols", "iterm", "kitty", "sixels"}
 VALID_POSITIONS = {"left", "center", "right"}
-POSITION_TO_CHAFA = {"left": "left", "center": "center", "right": "right"}
+
+import re as _re
+
+def _measure_image_cols(output: str, fmt: str, fallback: int) -> int:
+    """How many terminal cells wide is the rendered image?
+
+    For iterm/kitty: parsed from the protocol header (width=N).
+    For sixels: there's no protocol-level width, fall back to user's --size cols.
+    For symbols: max display width across all lines (after stripping ANSI)."""
+    if fmt == "iterm":
+        m = _re.search(r'width=(\d+)', output)
+        return int(m.group(1)) if m else fallback
+    if fmt == "kitty":
+        m = _re.search(r'c=(\d+)', output)
+        return int(m.group(1)) if m else fallback
+    if fmt == "symbols":
+        cleaned = _re.sub(r'\x1b\[[0-9;]*[mGKH]', '', output)
+        widths = [len(line) for line in cleaned.split("\n")]
+        return max(widths) if widths else fallback
+    return fallback
+
 
 def render_with_chafa(png: Path, size: str, fmt: str, position: str) -> int:
     """fmt:
@@ -396,9 +416,14 @@ def render_with_chafa(png: Path, size: str, fmt: str, position: str) -> int:
         center   — image horizontally centred in the terminal
         right    — image at the right edge of the terminal
 
-    For center/right, we expand the chafa size to the full terminal width and
-    pass --align so chafa places the actual image accordingly; the grid art
-    is not scaled — it just shifts horizontally within the wider canvas.
+    Position is implemented as a post-render shift. We always render at the
+    user's exact --size, then for non-left positions, we measure the
+    rendered image's width and either pad each output line with spaces
+    (symbols mode) or emit an absolute cursor-move escape before the image
+    (iterm/kitty/sixels modes). This avoids chafa's --align which only
+    shifts within whatever --size you give it — useless for our case where
+    the user's --size IS the image size and shifting needs to happen
+    within the full terminal width.
     """
     chafa = shutil.which("chafa")
     if not chafa:
@@ -408,21 +433,43 @@ def render_with_chafa(png: Path, size: str, fmt: str, position: str) -> int:
     if position not in VALID_POSITIONS:
         sys.exit(f"position must be one of {VALID_POSITIONS}, got {position!r}")
 
-    cmd = [chafa, f"--format={fmt}", "--animate=off"]
+    cmd = [chafa, f"--format={fmt}", "--animate=off", f"--size={size}", str(png)]
+
     if position == "left":
-        cmd.append(f"--size={size}")
-    else:
-        # Expand horizontal axis to terminal width so --align has room to shift.
-        try:
-            term_cols = os.get_terminal_size().columns
-        except OSError:
-            term_cols = 100
-        # Keep user's row count from the original size; widen cols only.
-        rows_part = size.split("x")[1] if "x" in size else size
-        cmd.append(f"--size={term_cols}x{rows_part}")
-        cmd.append(f"--align={POSITION_TO_CHAFA[position]},top")
-    cmd.append(str(png))
-    return subprocess.call(cmd)
+        return subprocess.call(cmd)
+
+    # Capture chafa output to inject our own positioning
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    output = r.stdout
+    if r.returncode != 0 or not output:
+        sys.stdout.write(output)
+        return r.returncode
+
+    try:
+        term_cols = os.get_terminal_size().columns
+    except OSError:
+        term_cols = 100
+
+    fallback_cols = int(size.split("x")[0]) if "x" in size else int(size)
+    image_cols = _measure_image_cols(output, fmt, fallback_cols)
+    slack = term_cols - image_cols
+    if slack <= 0:
+        sys.stdout.write(output)
+        return 0
+
+    pad = slack if position == "right" else slack // 2
+
+    if fmt == "symbols":
+        # Per-line space padding so each row of art starts at the right column
+        spaces = " " * pad
+        for line in output.split("\n"):
+            sys.stdout.write(spaces + line + "\n")
+        return 0
+
+    # iterm / kitty / sixels: a single escape blob. Move cursor first.
+    sys.stdout.write(f"\x1b[{pad+1}G")
+    sys.stdout.write(output)
+    return 0
 
 
 # --- CLI ----------------------------------------------------------------------
