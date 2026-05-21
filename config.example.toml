@@ -1,0 +1,30 @@
+# scrobble-say config — copy to ~/.config/scrobble-say/config.toml and edit.
+# Secrets do NOT go here; they live in 1Password and are read at runtime.
+
+[lastfm]
+username = "your-lastfm-username"
+
+# Where to read the API key + shared secret from.
+#   "op"     — read from 1Password (default; preferred)
+#   "env"    — read from $LASTFM_API_KEY / $LASTFM_SHARED_SECRET env vars
+secrets_source = "op"
+
+# Only consulted if secrets_source = "op". Set to your 1Password item ID.
+# Find it with:  op item list --vault Personal --format=json | jq '.[] | select(.title | test("Music"; "i"))'
+op_vault = "Personal"
+op_item_id = "REPLACE_WITH_OP_ITEM_ID"
+
+[render]
+# chafa target size for the cover grid (cols x rows of char cells).
+size = "60x30"
+# How many covers per side of the grid (3 -> 3x3 = 9 covers).
+grid = 3
+# Period passed to user.gettopalbums: 7day | 1month | 3month | 6month | 12month | overall
+period = "7day"
+
+[cache]
+# Where to keep downloaded cover art + composed grids.
+# Set to "" to disable on-disk caching.
+dir = "~/.cache/scrobble-say"
+# Re-fetch top-albums data after this many seconds (default: 1 day).
+ttl_seconds = 86400

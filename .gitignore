@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Build / dist
+build/
+dist/
+
+# Local config (may contain creds if user opts out of 1Password)
+config.toml
+config.local.toml
+.env
+.env.local
+secrets.*
+Secrets.*
+*credentials*
+*token*
+
+# Cache (downloaded album covers, generated grids)
+cache/
+*.cache
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# gitleaks scan reports (don't commit reports)
+gitleaks-report.json

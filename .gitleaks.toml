@@ -1,0 +1,40 @@
+# gitleaks config — scans staged content for secrets before commit.
+# https://github.com/gitleaks/gitleaks
+
+title = "scrobble-say gitleaks rules"
+
+# Extend the default upstream ruleset (catches AWS keys, GH tokens, generic
+# high-entropy strings, etc.) and add a few music-API-specific patterns.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "lastfm-api-key"
+description = "Last.fm API key (32-char hex)"
+regex = '''(?i)(lastfm[_\-]?(api[_\-]?key|key)|LASTFM_API_KEY)\s*[:=]\s*['\"]?[a-f0-9]{32}['\"]?'''
+keywords = ["lastfm", "LASTFM_API_KEY"]
+
+[[rules]]
+id = "lastfm-shared-secret"
+description = "Last.fm shared secret (32-char hex)"
+regex = '''(?i)(lastfm[_\-]?(shared[_\-]?)?secret|LASTFM_SHARED_SECRET)\s*[:=]\s*['\"]?[a-f0-9]{32}['\"]?'''
+keywords = ["lastfm", "LASTFM_SHARED_SECRET"]
+
+[[rules]]
+id = "discogs-token"
+description = "Discogs personal access token (40 chars)"
+regex = '''(?i)(discogs[_\-]?(token|access[_\-]?token)|DISCOGS_TOKEN)\s*[:=]\s*['\"]?[A-Za-z0-9]{40}['\"]?'''
+keywords = ["discogs", "DISCOGS_TOKEN"]
+
+# Allow placeholder strings in example/template files
+[allowlist]
+description = "ignore obvious placeholders + example configs"
+regexes = [
+  '''YOUR_[A-Z_]+_HERE''',
+  '''<\s*placeholder\s*>''',
+  '''XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX''',  # 32 X's
+]
+paths = [
+  '''config\.example\.toml''',
+  '''\.gitleaks\.toml''',  # the regex patterns themselves match the rules
+]
