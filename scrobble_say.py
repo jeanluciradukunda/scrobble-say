@@ -384,6 +384,36 @@ VALID_POSITIONS = {"left", "center", "right"}
 
 import re as _re
 
+def _get_term_cols() -> int:
+    """Detect terminal width robustly. Useful when os.get_terminal_size()
+    fails (precmd contexts where the TTY isn't fully wired up yet) — falls
+    back to $COLUMNS (zsh sets this on SIGWINCH and at startup) and then to
+    `tput cols` as a last resort."""
+    debug = os.environ.get("SCROBBLE_DEBUG") == "1"
+    try:
+        c = os.get_terminal_size().columns
+        if c > 0:
+            if debug: print(f"[scrobble-say debug] term_cols={c} via os.get_terminal_size", file=sys.stderr)
+            return c
+    except OSError:
+        pass
+    env = os.environ.get("COLUMNS", "").strip()
+    if env.isdigit() and int(env) > 0:
+        c = int(env)
+        if debug: print(f"[scrobble-say debug] term_cols={c} via $COLUMNS", file=sys.stderr)
+        return c
+    try:
+        r = subprocess.run(["tput", "cols"], capture_output=True, text=True, timeout=1)
+        out = r.stdout.strip()
+        if out.isdigit() and int(out) > 0:
+            c = int(out)
+            if debug: print(f"[scrobble-say debug] term_cols={c} via tput", file=sys.stderr)
+            return c
+    except (subprocess.SubprocessError, ValueError, FileNotFoundError):
+        pass
+    if debug: print("[scrobble-say debug] term_cols=100 (fallback)", file=sys.stderr)
+    return 100
+
 def _measure_image_cols(output: str, fmt: str, fallback: int) -> int:
     """How many terminal cells wide is the rendered image?
 
@@ -445,14 +475,12 @@ def render_with_chafa(png: Path, size: str, fmt: str, position: str) -> int:
         sys.stdout.write(output)
         return r.returncode
 
-    try:
-        term_cols = os.get_terminal_size().columns
-    except OSError:
-        term_cols = 100
-
+    term_cols = _get_term_cols()
     fallback_cols = int(size.split("x")[0]) if "x" in size else int(size)
     image_cols = _measure_image_cols(output, fmt, fallback_cols)
     slack = term_cols - image_cols
+    if os.environ.get("SCROBBLE_DEBUG") == "1":
+        print(f"[scrobble-say debug] image_cols={image_cols} slack={slack} position={position}", file=sys.stderr)
     if slack <= 0:
         sys.stdout.write(output)
         return 0
