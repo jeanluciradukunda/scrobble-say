@@ -103,6 +103,19 @@ def read_secret_via_op(vault: str, item_id: str, field: str) -> str:
     return r.stdout.strip()
 
 
+EXIT_CACHE_MISS = 3
+
+
+def api_key_fn(cfg: dict[str, Any]):
+    """How a cache miss gets the API key. With SCROBBLE_SAY_CACHED_ONLY set (the shell greeting sets it), a miss exits
+    quietly instead: reading the key can stop at a 1Password prompt, and a new terminal must never wait on one."""
+    if os.environ.get("SCROBBLE_SAY_CACHED_ONLY"):
+        def miss() -> str:
+            sys.exit(EXIT_CACHE_MISS)
+        return miss
+    return lambda: get_api_key(cfg)
+
+
 def get_api_key(cfg: dict[str, Any]) -> str:
     src = cfg["lastfm"].get("secrets_source", "op")
     if src == "env":
@@ -700,7 +713,7 @@ def main() -> None:
         # --no-cache disables the now-playing cache too (Codex #4)
         now_ttl = 0 if args.no_cache else int(cfg.get("cache", {}).get("now_ttl_seconds", 30))
         try:
-            rt = fetch_now_playing(user, lambda: get_api_key(cfg), cache, now_ttl)
+            rt = fetch_now_playing(user, api_key_fn(cfg), cache, now_ttl)
         except LastFmError as e:
             sys.exit(str(e))
         except requests.RequestException as e:
@@ -728,7 +741,7 @@ def main() -> None:
     # Lazy: get_api_key is only invoked on cache miss, so warm calls skip
     # the 1Password Touch ID prompt entirely.
     try:
-        albums = fetch_top_albums(user, lambda: get_api_key(cfg), period, cols * rows, cache, ttl)
+        albums = fetch_top_albums(user, api_key_fn(cfg), period, cols * rows, cache, ttl)
     except LastFmError as e:
         sys.exit(str(e))
     except requests.RequestException as e:
